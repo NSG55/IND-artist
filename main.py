@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, io, json, time, asyncio, logging, random
+import os, io, json, logging, random
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
@@ -70,6 +70,9 @@ intents.message_content = True
 intents.members         = True
 bot = commands.Bot(command_prefix="ind.", intents=intents, help_command=None)
 
+# Track processed messages to avoid double-scoring
+processed_messages: set[int] = set()
+
 def extract_image_url(msg: discord.Message) -> str | None:
     for a in msg.attachments:
         if a.content_type and a.content_type.startswith("image"):
@@ -95,10 +98,18 @@ async def on_ready():
 async def on_message(msg: discord.Message):
     if msg.author.bot:
         return
+    # normalize IND. prefix case-insensitively
+    if msg.content.lower().startswith("ind."):
+        msg.content = "ind." + msg.content[4:]
+    # process commands first
     await bot.process_commands(msg)
+    # avoid double-scoring
+    if msg.id in processed_messages:
+        return
     url = extract_image_url(msg)
     if not url:
         return
+    processed_messages.add(msg.id)
     await msg.reply("🔍 Scoring your image...")
     try:
         async with msg.channel.typing():
@@ -106,7 +117,7 @@ async def on_message(msg: discord.Message):
     except Exception as e:
         await msg.reply(f"⚠️ Scoring error: {e}")
         return
-    db  = load_scores()
+    db = load_scores()
     uid = str(msg.author.id)
     db["images"].append({
         "user": uid,
@@ -125,14 +136,15 @@ async def on_message(msg: discord.Message):
 @bot.command(name="help")
 async def ind_help(ctx):
     lines = [
-        "ind.help   – Lists all available IND commands.",
-        "ind.avg    – Shows your lifetime average score.",
-        "ind.rank   – Tells you your all-time rank and average.",
-        "ind.week   – Displays the Top 5 averages from the last 7 days.",
-        "ind.streak – Shows how many consecutive days you’ve posted a photo.",
-        "ind.top    – Shows the Top 5 all-time averages.",
-        "ind.daily  – Gives a random photo theme prompt.",
-        "ind.reset  – `@user` (admin only) Wipes a user’s scores and streak."
+        "ind.help   – List all IND commands.",
+        "ind.avg    – Show your lifetime average score.",
+        "ind.rank   – Your all-time rank and average.",
+        "ind.week   – Top 5 averages in the last 7 days.",
+        "ind.streak – Your consecutive posting days.",
+        "ind.top    – Top 5 all-time averages.",
+        "ind.daily  – A random photo theme prompt.",
+        "ind.top3   – Top 3 highest-rated images.",
+        "ind.reset  – @user (admin only) clear user data."
     ]
     await ctx.reply("**IND Bot Commands**\n" + "\n".join(lines))
 
@@ -142,7 +154,7 @@ async def ind_avg(ctx):
     if not s or not s["scores"]:
         return await ctx.reply("You have no scores yet.")
     avg = sum(s["scores"]) / len(s["scores"])
-    await ctx.reply(f"Your average composition: **{avg:.2f}/10**")
+    await ctx.reply(f"Your average image score: **{avg:.2f}/10**")
 
 @bot.command(name="top")
 async def ind_top(ctx):
@@ -180,15 +192,14 @@ async def ind_rank(ctx):
 @bot.command(name="week")
 async def ind_week(ctx):
     cutoff = datetime.utcnow() - timedelta(days=7)
-    images = load_scores()["images"]
-    recent_scores: Dict[str, list[float]] = {}
-    for img in images:
+    imgs = load_scores()["images"]
+    recent: Dict[str, list[float]] = {}
+    for img in imgs:
         ts = datetime.fromisoformat(img["ts"])
         if ts > cutoff:
-            recent_scores.setdefault(img["user"], []).append(img["score"])
+            recent.setdefault(img["user"], []).append(img["score"])
     board = sorted(
-        ((uid, sum(scores)/len(scores))
-         for uid,scores in recent_scores.items()),
+        ((uid, sum(scores)/len(scores)) for uid,scores in recent.items()),
         key=lambda x: x[1], reverse=True
     )[:5]
     if not board:
@@ -202,8 +213,7 @@ async def ind_week(ctx):
 
 @bot.command(name="streak")
 async def ind_streak(ctx):
-    data = load_scores()["users"].get(str(ctx.author.id), {})
-    dates = sorted(data.get("dates", []), reverse=True)
+    dates = sorted(load_scores()["users"].get(str(ctx.author.id), {}).get("dates", []), reverse=True)
     streak = 0
     today = datetime.utcnow().date()
     for d in dates:
@@ -221,6 +231,19 @@ async def ind_streak(ctx):
 async def ind_daily(ctx):
     prompt = random.choice(PHOTO_PROMPTS)
     await ctx.reply(f"📸 **Today's photo theme:** {prompt}")
+
+@bot.command(name="top3")
+async def ind_top3(ctx):
+    imgs = load_scores()["images"]
+    if not imgs:
+        return await ctx.reply("No images scored yet.")
+    top3 = sorted(imgs, key=lambda x: x["score"], reverse=True)[:3]
+    lines = []
+    for i,img in enumerate(top3,1):
+        m = ctx.guild.get_member(int(img["user"])) if ctx.guild else None
+        name = m.display_name if m else f"User {img['user']}"
+        lines.append(f"`#{i}` **{name}** – {img['score']:.2f}/10")
+    await ctx.reply("🏅 **Top 3 Images**\n" + "\n".join(lines))
 
 @bot.command(name="reset")
 @commands.has_permissions(administrator=True)

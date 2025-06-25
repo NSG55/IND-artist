@@ -15,8 +15,9 @@ from PIL import Image, ImageFilter
 
 # Config & Logging
 load_dotenv()
-TOKEN       = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
 SCORES_FILE = "scores.json"
+PHOTOGRAPHY_CHANNEL_ID = 1387102048209866932  # only score in this channel
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,7 +39,6 @@ PHOTO_PROMPTS = [
     "abstract textures and patterns"
 ]
 
-# Persistence
 def load_scores() -> Dict[str, Any]:
     if os.path.exists(SCORES_FILE):
         return json.load(open(SCORES_FILE, "r", encoding="utf-8"))
@@ -47,11 +47,10 @@ def load_scores() -> Dict[str, Any]:
 def save_scores(db: Dict[str, Any]) -> None:
     json.dump(db, open(SCORES_FILE, "w", encoding="utf-8"), indent=2)
 
-# Composition heuristic (rule-of-thirds)
 def composition_score(img: Image.Image) -> float:
     edges = img.convert("L").filter(ImageFilter.FIND_EDGES)
-    arr   = np.array(edges, dtype=np.float32) / 255.0
-    h, w  = arr.shape
+    arr = np.array(edges, dtype=np.float32) / 255.0
+    h, w = arr.shape
     ys, xs = np.indices((h, w))
     total = arr.sum()
     if total == 0:
@@ -64,13 +63,11 @@ def composition_score(img: Image.Image) -> float:
     maxd = np.hypot(w/3, h/3)
     return float((1 - min(dmin / maxd, 1.0)) * 10.0)
 
-# Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members         = True
+intents.members = True
 bot = commands.Bot(command_prefix="ind.", intents=intents, help_command=None)
 
-# Track processed messages to avoid double-scoring
 processed_messages: set[int] = set()
 
 def extract_image_url(msg: discord.Message) -> str | None:
@@ -89,7 +86,6 @@ async def score_image(url: str) -> float:
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     return composition_score(img)
 
-# Events
 @bot.event
 async def on_ready():
     logger.info("Logged in as %s", bot.user)
@@ -98,11 +94,13 @@ async def on_ready():
 async def on_message(msg: discord.Message):
     if msg.author.bot:
         return
-    # normalize IND. prefix case-insensitively
+    # normalize any case for prefix
     if msg.content.lower().startswith("ind."):
         msg.content = "ind." + msg.content[4:]
-    # process commands first
     await bot.process_commands(msg)
+    # only score images in the photography channel
+    if msg.channel.id != PHOTOGRAPHY_CHANNEL_ID:
+        return
     # avoid double-scoring
     if msg.id in processed_messages:
         return
@@ -132,7 +130,6 @@ async def on_message(msg: discord.Message):
     save_scores(db)
     await msg.reply(f"🖼️ **Image score:** {score:.2f}/10")
 
-# Commands
 @bot.command(name="help")
 async def ind_help(ctx):
     lines = [
@@ -160,8 +157,7 @@ async def ind_avg(ctx):
 async def ind_top(ctx):
     users = load_scores()["users"]
     board = sorted(
-        ((uid, sum(u["scores"]) / len(u["scores"]))
-         for uid,u in users.items() if u["scores"]),
+        ((uid, sum(u["scores"]) / len(u["scores"])) for uid,u in users.items() if u["scores"]),
         key=lambda x: x[1], reverse=True
     )[:5]
     if not board:
@@ -177,8 +173,7 @@ async def ind_top(ctx):
 async def ind_rank(ctx):
     users = load_scores()["users"]
     board = sorted(
-        ((uid, sum(u["scores"]) / len(u["scores"]))
-         for uid,u in users.items() if u["scores"]),
+        ((uid, sum(u["scores"]) / len(u["scores"])) for uid,u in users.items() if u["scores"]),
         key=lambda x: x[1], reverse=True
     )
     uids = [uid for uid,_ in board]
@@ -258,7 +253,6 @@ async def ind_reset(ctx, member: discord.Member):
     else:
         await ctx.reply(f"No data found for {member.display_name}.")
 
-# Run
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN missing")
